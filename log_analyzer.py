@@ -14,21 +14,27 @@ import re
 import logging
 import gzip
 import itertools
+import argparse
+import sys
 from datetime import datetime, date
-from collections import Counter
+from collections import Counter, defaultdict
 from string import Template
 
 config = {
     "REPORT_SIZE": 1000,
     "REPORT_DIR": "./reports",
     "LOG_DIR": "./log",
+    "NAME_LOG": "myOtus.log",
+    "ERROR_PERCENT": 10,
     "NAME_PATERN": 
     "nginx-access-ui.log-[0-9]{4}(0[1-9]|1[012])(0[1-9]|1[0-9]|2[0-9]|3[01])"
 }
 
 
 def grep(log_lines):
-
+    """Разбирает строки по заданному формату и возвращает кортеж
+    разобранных значений и % ошибок 
+    """
     pattern = re.compile(r'(\d+\.\d+\.\d+\.\d+) (\S+)  (\S+) \[(.+)\] \"(.+)\" ' 
     r'(\d+) (\d+) \"(\S+)\" \"(.+)\" \"(\S+)\" \"(\S+)\" \"(\S+)\" (\S+)')
 
@@ -46,6 +52,9 @@ def grep(log_lines):
 
 
 def percent_error(generator_log):
+    """Считает полное количество строк и количество строк, не 
+    подощедших под формат и возвращает % несоответствия  
+    """
     #больше 60% времени цп жрет эта функция 
     #с этим нужно что-то делать
     
@@ -65,20 +74,20 @@ def percent_error(generator_log):
     return error_percent
 
 
-def main():
+def main(config):
 
-    name_log = "myOtus.log"
-    
+    name_log = config.get("NAME_LOG")
+    folder = config.get("LOG_DIR")
+    report_dir = config.get("REPORT_DIR")
+    pattern_name = config.get("NAME_PATERN")
+    most_com = int(config.get("REPORT_SIZE"))
+    border_error_percent = int(config.get("ERROR_PERCENT"))
+
     logging.basicConfig(filename=name_log, level=logging.INFO,
       format="%(asctime)s %(levelname).1s %(message)s",
       datefmt="%Y.%m.%d %H:%M:%S")
 
     logging.info("Program started")
-
-    folder = config.get("LOG_DIR")
-    report_dir = config.get("REPORT_DIR")
-    pattern_name = config.get("NAME_PATERN")
-    most_com = config.get("REPORT_SIZE")
 
     rex = re.compile(pattern_name)
 
@@ -92,7 +101,7 @@ def main():
 
     tuples, error_percent = grep(log_lines)
 
-    if error_percent >= 10:
+    if error_percent > border_error_percent:
         logging.error("Превышен порог ошибок")
         return
 
@@ -113,6 +122,9 @@ def main():
 
 
 def generate_report(report_table, last_date, report_dir):
+    """Читает шаблон отчета и если не создан отчет за  last_date
+    в директории report_dir создает отчет и заполняет его из report_table 
+    """
     name_report = os.path.join(report_dir, "report-{}.html".format(last_date))
 
     if os.path.exists(name_report):
@@ -136,13 +148,18 @@ def generate_report(report_table, last_date, report_dir):
 
         
 def most_common_value(log, srch_key, sum_key, most_com):
-    
+    """По полю поиска srch_key вычисляется сумма по полю sum_key
+    и выбирается количество most_com встречаюшихся записей.
+    Так же считается количество записей по srch_key, максимальное 
+    время, среднее время и медиана. Создается таблица для отчета.
+    """
     all_count_time = Counter()
     count_request = Counter()
     max_time_count = Counter()
 
     sum_request = 0
     sum_request_time = 0
+    mediana_dict = defaultdict(list)
 
     for line in log:
         request_time = float(line[sum_key])
@@ -157,6 +174,11 @@ def most_common_value(log, srch_key, sum_key, most_com):
         if max_time_count[line[srch_key]] < request_time:
             max_time_count[line[srch_key]] = request_time
 
+        #здесь теряется почти все приемущества генератора
+        #т.к. собираются все значения request_time из файла в список
+        #и это печально
+        mediana_dict[line[srch_key]].append(request_time)
+            
     most_common = all_count_time.most_common(most_com)   
     
     report_table = []
@@ -168,9 +190,19 @@ def most_common_value(log, srch_key, sum_key, most_com):
         count_perc = count_req/sum_request * 100
         time_avg = el[1]/count_req
 
+        sort_list = sorted(mediana_dict.get(el[0]))
+        if len(sort_list) % 2 == 0:
+            index_med = int(len(sort_list) / 2)
+            #середина между центральными значениями
+            time_med = (sort_list[index_med] + sort_list[index_med-1]) / 2
+        else: 
+            #целая часть от деления будет серединой
+            index_med = len(sort_list) // 2   
+            time_med = sort_list[index_med]
+
         log_line = {"count": count_req, "time_avg": time_avg,
                     "time_max": max_time, "time_sum": el[1],
-                    "url": el[0], "time_med": 1,
+                    "url": el[0], "time_med": time_med,
                     "time_perc": time_perc, "count_perc": count_perc}
 
         report_table.append(log_line)
@@ -179,6 +211,10 @@ def most_common_value(log, srch_key, sum_key, most_com):
     
 
 def searchfiles(folder, rex):
+    """По заданному формату rex в папке folder ищет самый
+    последний исходя из названия файл plate или .gz 
+    используется os.scandir поэтому требуется python 3.6 <
+    """
     date_now = datetime.now().date()
 
     last_file = None
@@ -215,6 +251,8 @@ def searchfiles(folder, rex):
 
 
 def gen_cat(logfile):
+    """Открывает файл и считывает из него строки 
+    """
     if logfile.name.endswith(".gz"):
         log = gzip.open(logfile.path, "rt", encoding = "utf-8")
     else:
@@ -224,12 +262,33 @@ def gen_cat(logfile):
         yield line    
 
     log.close()                   
-
-
-def printlines(lines):
-    for line in lines:
-        print(line)
           
 
+def createParser ():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=argparse.FileType(mode='rt', 
+     encoding='utf-8'), default='Config.txt')
+ 
+    return parser
+
 if __name__ == "__main__":
-    main()
+    parser = createParser()
+    #в теории это должно работать, но на моей машине 
+    #sys.argv[1:] возвращает пустой список вместо параметров командной строки
+    #т.ч. всегда берется default='Config.txt'
+    args = parser.parse_args(sys.argv[1:])
+    
+    #не совсем понял, каким должен быть формат конфига,
+    #т.ч. сделал просто текстовый файл
+    text = args.config.read().split('\n')
+    
+    file_conf = {}
+    for line in text:
+        key, value = line.split(':')
+        file_conf[key] = value.strip()
+
+    args.config.close()
+    print(file_conf)
+    config.update(file_conf)
+
+    main(config)
